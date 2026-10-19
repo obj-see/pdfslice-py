@@ -23,7 +23,11 @@ TypeScript original.
   - [Directory Search Depth](#directory-search-depth)
   - [Flatten Output](#flatten-output)
   - [Custom Filename Template](#custom-filename-template)
+  - [Output Files](#output-files)
+  - [Resume and Rerun](#resume-and-rerun)
+  - [Troubleshooting](#rotating_light-troubleshooting)
   - [Example Workflow](#example-workflow)
+  - [End-to-End Guide](#end-to-end-guide)
 - [Project Structure](#file_folder-project-structure)
 - [Running Tests](#test_tube-running-tests)
 - [Contributing](#wave-contributing)
@@ -232,6 +236,33 @@ filename (default: `{{filename}}.{{page_number}}.jpg`). Exactly one
 `gather`/`check` parse page numbers back out correctly without needing
 `--template` repeated.
 
+### Output Files
+
+| Path | Written by | Holds |
+|---|---|---|
+| `<name>/<name>.pdf` | `split` | a copy of the source PDF; the original is never touched |
+| `<name>/<name>.<NNN>.jpg` | `split` | one JPEG per page (2x resolution, quality 90), numbered from 1 and zero-padded to three digits |
+| `<name>/.pdfslice-manifest.json` | `split`, `gather` | page count, per-image SHA-256, filename template, `updatedAt`, `gatheredAt` |
+| `<name>/<name>.bak-<epoch ms>.pdf` | `gather` | the PDF as it was before it was overwritten (`--no-backup` skips it) |
+
+### Resume and Rerun
+
+- `split` has no skip rule: running it again rewrites every image and the manifest.
+- `gather` skips a unit whose images are unchanged since the last gather
+  (`No changes detected, skipping PDF creation`).
+- `check` never writes anything.
+- A folder counts as a split unit only if it holds a manifest.
+
+### :rotating_light: Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| `Found 0 PDF(s)` | the PDFs are deeper than `--level`; raise it or pass one PDF |
+| `No manifest found in unit folder` | the folder was not produced by `split`; split it, or point at the right folder |
+| `Template must contain exactly one {{page_number}} placeholder` | fix `--template` |
+| `gather` wrote a shorter PDF | page images were missing and `gather` does not stop for that; run `check` first, restore `<name>.bak-*.pdf` |
+| two PDFs share one folder | `--flatten` with equal PDF names; rename the PDFs |
+
 ### Example Workflow
 
 ```bash
@@ -239,6 +270,11 @@ pdfslice split ./input --level 2
 pdfslice check ./input/report
 pdfslice gather ./input/report
 ```
+
+### End-to-End Guide
+
+Install, split, check, sort the images for the OCR pipeline, rebuild a PDF, and the common problems:
+[`docs/USER_GUIDE.md`](docs/USER_GUIDE.md).
 
 ## :file_folder: Project Structure
 
@@ -254,17 +290,23 @@ src/pdfslice_py/
 ├── manifest.py                # .pdfslice-manifest.json schema + read/write
 └── split.py                   # PDF -> per-page JPG splitting
 tests/
+├── test_cli.py
 ├── test_discover.py
 ├── test_filename_template.py
 ├── test_manifest.py
 └── test_split_gather.py
+docs/
+├── SPECIFICATION.md         # what the code does today
+└── USER_GUIDE.md            # end-to-end guide
 ```
 
 ## :test_tube: Running Tests
 
 ```bash
-uv pip install -e ".[test]"
+uv sync
 uv run pytest -v
+uv run ruff check .
+uv run ruff format --check .
 ```
 
 ## :wave: Contributing
@@ -272,6 +314,10 @@ uv run pytest -v
 Contributions are always welcome!
 
 Please read the [contribution guidelines](./CONTRIBUTING.md).
+
+Repo-specific rules: the manifest keeps the camelCase JSON schema of the TypeScript original, so
+folders split by either tool stay readable by the other; the library never calls the network and does not depend
+on any pipeline repo.
 
 <!-- Code of Conduct -->
 

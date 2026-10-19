@@ -43,3 +43,8 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Local work and secrets
+.env
+ocr_work/
+ocr_out/

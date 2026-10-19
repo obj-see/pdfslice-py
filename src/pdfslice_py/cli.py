@@ -6,6 +6,7 @@ import sys
 
 import click
 
+from . import __version__
 from .filename_template import DEFAULT_TEMPLATE
 from .gather import gather_all
 from .logger import create_logger
@@ -20,7 +21,7 @@ def _log_flags(f: click.decorators.FC) -> click.decorators.FC:
 
 
 @click.group()
-@click.version_option(version="0.1.0", prog_name="pdfslice")
+@click.version_option(version=__version__, prog_name="pdfslice")
 def cli() -> None:
     """Split PDFs into page images, then gather or check them back."""
 

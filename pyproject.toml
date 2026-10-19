@@ -29,11 +29,16 @@ pdfslice = "pdfslice_py.cli:cli"
 test = ["pytest>=8.0"]
 lint = ["ruff>=0.6"]
 
+[dependency-groups]
+# Installed by default by `uv run` / `uv sync`. The `test` and `lint` extras stay for pip users.
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]  # tests import shared helpers as `from tests.helpers import ...`
 
 [tool.ruff]
 line-length = 100
@@ -52,11 +57,15 @@ select = [
     "SIM", # flake8-simplify
 ]
 ignore = [
+    "E501", # line length is enforced by the formatter
     "N815", # camelCase attrs — manifest fields mirror the on-disk JSON schema on purpose
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["N802"] # test_* function names, camelCase-style asserts on manifest fields
+"*.ipynb" = ["E402", "E702"]
 
 [tool.ruff.format]
+# Notebooks hold IPython magics (`!cmd`) and long one-line probes; they are not auto-formatted.
+exclude = ["*.ipynb"]
 quote-style = "double"
