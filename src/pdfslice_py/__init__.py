@@ -6,11 +6,15 @@ the `pdfslice` CLI (`split`/`gather`/`check` subcommands).
 
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
+
 from .discover import find_images_deep, find_pdfs, page_image_name, parse_page_from_image_name
+from .failure import describe_error, get_progress, set_progress
 from .filename_template import DEFAULT_TEMPLATE, FilenameTemplate, compile_template
 from .gather import Action, UnitReport, gather_all
 from .hash import hash_file
-from .logger import Logger, create_logger
+from .logger import Logger, create_logger, format_line, utc_now_iso
 from .manifest import (
     MANIFEST_FILENAME,
     Manifest,
@@ -21,7 +25,11 @@ from .manifest import (
 )
 from .split import SplitResult, split_all
 
-__version__ = "1.1.0"
+try:
+    # Single source of truth is pyproject.toml, which release-please bumps.
+    __version__ = _pkg_version("pdfslice-py")
+except PackageNotFoundError:
+    __version__ = "0+unknown"
 
 __all__ = [
     # split
@@ -52,4 +60,10 @@ __all__ = [
     # logging
     "Logger",
     "create_logger",
+    "format_line",
+    "utc_now_iso",
+    # error detail
+    "describe_error",
+    "get_progress",
+    "set_progress",
 ]

@@ -1,28 +1,23 @@
-"""PDF -> per-page JPG splitting.
+"""PDF -> per-page JPG splitting, one worker process per PDF.
 
-pypdfium2 (Google's PDFium, BSD-licensed — chosen over PyMuPDF's AGPL
-license for a permissively licensed CLI) rasterizes each page at 2x scale,
-Pillow re-encodes it to JPEG at quality 90.
+Mirrors pdfslice's split.ts: each PDF is split in its own spawned process, so
+a memory blowup or native crash (PDFium) on one file only affects that file —
+the batch continues with the next PDF.
 """
 
 from __future__ import annotations
 
-import shutil
+import multiprocessing
+import signal as signal_module
+import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
-import pypdfium2 as pdfium
-from pypdf import PdfReader
-
-from .discover import find_pdfs, page_image_name
+from .discover import find_pdfs
 from .filename_template import DEFAULT_TEMPLATE
-from .hash import hash_file
 from .logger import Logger, create_logger
-from .manifest import Manifest, ManifestImageEntry, write_manifest
-
-_RENDER_SCALE = 2  # ~2x native resolution
-_JPEG_QUALITY = 90
+from .split_one_file import SplitOneOptions
 
 
 @dataclass
@@ -32,10 +27,9 @@ class SplitResult:
     page_count: int
     images: list[str] = field(default_factory=list)
     skipped: bool = False
-
-
-def _folder_name_for(pdf_path: str | Path) -> str:
-    return Path(pdf_path).stem
+    # Set when this file's worker process crashed or errored; page_count/images will be empty.
+    failed: bool = False
+    error_message: str | None = None
 
 
 def split_all(
@@ -44,115 +38,180 @@ def split_all(
     level: int = 1,
     flatten: bool = False,
     template: str = DEFAULT_TEMPLATE,
+    force: bool = False,
     dry_run: bool = False,
 ) -> list[SplitResult]:
     """Split every PDF found under `input` into per-page JPG images.
 
-    `logger` is optional for library use — defaults to a quiet-info
-    `Logger` (see `create_logger`) when not provided. Pass your own to
-    control verbosity or route output through `--verbose`/`--quiet`/
-    `--log-file`, as the CLI does.
+    `logger` is optional for library use — defaults to an info-level
+    `Logger` (see `create_logger`) when not provided.
+
+    Workers are started with the "spawn" method, so scripts that call this
+    must guard their entry point with `if __name__ == "__main__":`.
     """
     if logger is None:
         logger = create_logger()
     pdfs = find_pdfs(input, level)
-    logger.info(f"Found {len(pdfs)} PDF file(s) under {input}", level=level)
+    logger.info(f"Found {len(pdfs)} PDF file(s) under {input}", search_level=level)
 
     results: list[SplitResult] = []
-    for pdf_path in pdfs:
-        results.append(
-            _split_one(
-                pdf_path,
-                input=input,
+    for index, pdf_path in enumerate(pdfs):
+        logger.info(f"Processing PDF {index + 1}/{len(pdfs)}", pdf_path=pdf_path)
+        result = _split_one_in_worker(
+            SplitOneOptions(
+                pdf_path=str(pdf_path),
+                input=str(input),
                 flatten=flatten,
                 template=template,
+                force=force,
                 dry_run=dry_run,
-                logger=logger,
-            )
+            ),
+            logger,
         )
+        results.append(result)
+
+        # The worker has no logger, so the outcome is logged here.
+        if not result.failed:
+            if dry_run:
+                logger.info(
+                    f"[dry-run] would split {pdf_path} into {result.output_folder} "
+                    f"({result.page_count} page(s))"
+                )
+            elif result.skipped:
+                logger.info(
+                    "Skipped, already split",
+                    pdf_path=pdf_path,
+                    output_folder=result.output_folder,
+                    page_count=result.page_count,
+                )
+            else:
+                logger.info(
+                    f"Split complete: {result.page_count} page(s)",
+                    pdf_path=pdf_path,
+                    output_folder=result.output_folder,
+                    page_count=result.page_count,
+                )
+
+    failed = [r for r in results if r.failed]
+    if failed:
+        logger.warn(
+            f"{len(failed)} of {len(pdfs)} PDF(s) failed to split",
+            failed=[r.pdf for r in failed],
+        )
+
     return results
 
 
-def _split_one(
-    pdf_path: str,
-    *,
-    input: str | Path,  # noqa: A002
-    flatten: bool,
-    template: str,
-    dry_run: bool,
-    logger: Logger,
-) -> SplitResult:
-    base_name = _folder_name_for(pdf_path)
-    parent_dir = Path(input) if flatten else Path(pdf_path).parent
-    output_folder = parent_dir / base_name
-    dest_pdf_path = output_folder / Path(pdf_path).name
+def _failed_result(pdf_path: str, error_message: str) -> SplitResult:
+    return SplitResult(
+        pdf=pdf_path,
+        output_folder="",
+        page_count=0,
+        images=[],
+        skipped=False,
+        failed=True,
+        error_message=error_message,
+    )
 
-    logger.info(f"Processing {pdf_path}", output_folder=str(output_folder))
 
-    if dry_run:
-        logger.info(f"[dry-run] would create folder {output_folder}")
-        logger.info(f"[dry-run] would move {pdf_path} -> {dest_pdf_path} (copy, original kept)")
-        page_count = len(PdfReader(pdf_path).pages)
-        for i in range(1, page_count + 1):
-            logger.info(f"[dry-run] would create image {page_image_name(base_name, i, template)}")
+def _split_one_in_worker(opts: SplitOneOptions, logger: Logger) -> SplitResult:
+    """Run split_one_file for a single PDF in its own child process."""
+    # Imported here so the child process only imports the worker module on spawn.
+    from .split_worker import run_worker
+
+    pdf_path = opts.pdf_path
+    ctx = multiprocessing.get_context("spawn")
+    receiver, sender = ctx.Pipe(duplex=False)
+    proc = ctx.Process(target=run_worker, args=(opts, sender))
+
+    started_at = time.monotonic()
+    proc.start()
+    # Close our copy of the child's end so a dead child shows up as EOF, not a hang.
+    sender.close()
+    logger.debug("Worker started", pdf_path=pdf_path, pid=proc.pid)
+
+    last: dict[str, Any] = {"stage": "start"}
+    final: dict[str, Any] | None = None
+    try:
+        while True:
+            try:
+                msg = receiver.recv()
+            except EOFError:
+                break  # worker ended without sending a result
+            if "progress" in msg:
+                last = msg["progress"]
+                if last.get("file_name") is not None:
+                    logger.debug(
+                        "Wrote page image",
+                        file_name=last["file_name"],
+                        page=last.get("page"),
+                        page_count=last.get("page_count"),
+                        bytes=last.get("bytes"),
+                        rss_mb=last.get("rss_mb"),
+                    )
+                continue
+            final = msg
+            break
+    finally:
+        receiver.close()
+        proc.join()
+
+    duration_ms = round((time.monotonic() - started_at) * 1000)
+
+    if final is not None and final.get("ok"):
+        logger.debug(
+            "Worker finished",
+            pdf_path=pdf_path,
+            pid=proc.pid,
+            duration_ms=duration_ms,
+            rss_mb=last.get("rss_mb"),
+        )
+        r = final["result"]
         return SplitResult(
-            pdf=str(pdf_path),
-            output_folder=str(output_folder),
-            page_count=page_count,
-            images=[],
-            skipped=True,
+            pdf=r["pdf"],
+            output_folder=r["output_folder"],
+            page_count=r["page_count"],
+            images=r["images"],
+            skipped=r["skipped"],
         )
 
-    output_folder.mkdir(parents=True, exist_ok=True)
+    if final is not None:
+        error = final["error"]
+        logger.error(
+            "Failed to split PDF",
+            pdf_path=pdf_path,
+            stage=final.get("stage"),
+            page=final.get("page"),
+            rss_mb=last.get("rss_mb"),
+            error=error,
+        )
+        return _failed_result(pdf_path, error["message"])
 
-    # "Move" without deleting the original: copy into the new folder. The
-    # original PDF at its source path is left untouched, per spec.
-    if not dest_pdf_path.exists():
-        shutil.copyfile(pdf_path, dest_pdf_path)
-
-    page_count = len(PdfReader(str(dest_pdf_path)).pages)
-
-    images: list[str] = []
-    image_entries: list[ManifestImageEntry] = []
-
-    doc = pdfium.PdfDocument(str(dest_pdf_path))
-    try:
-        for i in range(page_count):
-            page = doc[i]
-            bitmap = page.render(scale=_RENDER_SCALE)
-            img = bitmap.to_pil().convert("RGB")
-
-            page_num = i + 1
-            file_name = page_image_name(base_name, page_num, template)
-            image_path = output_folder / file_name
-            img.save(image_path, "JPEG", quality=_JPEG_QUALITY)
-            file_hash = hash_file(image_path)
-            images.append(str(image_path))
-            image_entries.append(ManifestImageEntry(file=file_name, page=page_num, hash=file_hash))
-            logger.debug("Wrote page image", file_name=file_name, page=page_num)
-
-            bitmap.close()
-            page.close()
-    finally:
-        doc.close()
-
-    source_pdf_hash = hash_file(dest_pdf_path)
-    manifest = Manifest(
-        version=1,
-        sourcePdf=dest_pdf_path.name,
-        sourcePdfHash=source_pdf_hash,
-        pageCount=page_count,
-        images=image_entries,
-        updatedAt=datetime.now(timezone.utc).isoformat(),
-        filenameTemplate=template,
+    # No result message at all: the process crashed outright (e.g. OOM kill)
+    # — treat as failure for this file and move on rather than losing the batch.
+    exit_code = proc.exitcode
+    sig = None
+    if exit_code is not None and exit_code < 0:
+        try:
+            sig = signal_module.Signals(-exit_code).name
+        except ValueError:
+            sig = f"signal {-exit_code}"
+    reason = (
+        f"killed by signal {sig} (likely out of memory)"
+        if sig is not None
+        else f"exited with code {exit_code}"
     )
-    write_manifest(output_folder, manifest)
-
-    logger.info(f"Split complete: {page_count} page(s)", output_folder=str(output_folder))
-    return SplitResult(
-        pdf=str(dest_pdf_path),
-        output_folder=str(output_folder),
-        page_count=page_count,
-        images=images,
-        skipped=False,
+    logger.error(
+        "Worker process crashed",
+        pdf_path=pdf_path,
+        reason=reason,
+        pid=proc.pid,
+        duration_ms=duration_ms,
+        exit_code=exit_code if sig is None else None,
+        signal=sig,
+        stage=last.get("stage"),
+        page=last.get("page"),
+        page_count=last.get("page_count"),
+        rss_mb=last.get("rss_mb"),
     )
+    return _failed_result(pdf_path, reason)

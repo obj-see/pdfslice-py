@@ -32,19 +32,21 @@ class Manifest:
     filenameTemplate: str = ""  # noqa: N815
 
     def to_json(self) -> str:
-        return json.dumps(
-            {
-                "version": self.version,
-                "sourcePdf": self.sourcePdf,
-                "sourcePdfHash": self.sourcePdfHash,
-                "pageCount": self.pageCount,
-                "images": [{"file": i.file, "page": i.page, "hash": i.hash} for i in self.images],
-                "updatedAt": self.updatedAt,
-                "gatheredAt": self.gatheredAt,
-                "filenameTemplate": self.filenameTemplate,
-            },
-            indent=2,
-        )
+        data = {
+            "version": self.version,
+            "sourcePdf": self.sourcePdf,
+            "sourcePdfHash": self.sourcePdfHash,
+            "pageCount": self.pageCount,
+            "images": [{"file": i.file, "page": i.page, "hash": i.hash} for i in self.images],
+            "updatedAt": self.updatedAt,
+            "gatheredAt": self.gatheredAt,
+            "filenameTemplate": self.filenameTemplate,
+        }
+        # The pdfslice CLI omits gatheredAt until the first gather (JSON.stringify
+        # drops undefined), and writes raw UTF-8; do the same so the files are identical.
+        if data["gatheredAt"] is None:
+            del data["gatheredAt"]
+        return json.dumps(data, indent=2, ensure_ascii=False)
 
     @classmethod
     def from_json(cls, text: str) -> Manifest:
