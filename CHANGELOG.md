@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.1.1](https://github.com/obj-see/pdfslice-py/compare/v1.1.0...v1.1.1) (2026-11-03)
+
+
+### Bug Fixes
+
+* update logging ([8a57075](https://github.com/obj-see/pdfslice-py/commit/8a57075796009ba54c30c39d9b8c8b00830ca646))
+
+
+### Documentation
+
+* update documents ([1cb0fcf](https://github.com/obj-see/pdfslice-py/commit/1cb0fcf23a66780c0843707d6bf11ac213970b96))
+
 ## [1.1.0](https://github.com/DuckyMomo20012/pdfslice-py/compare/v1.0.1...v1.1.0) (2026-09-16)
 
 
