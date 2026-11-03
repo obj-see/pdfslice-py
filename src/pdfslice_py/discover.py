@@ -31,7 +31,8 @@ def find_pdfs(root: str | Path, level: int = 1) -> list[str]:
                     walk(full, depth + 1)
 
     walk(root, 1)
-    return results
+    # scandir order is filesystem-dependent; sort so both CLIs process the same order.
+    return sorted(results)
 
 
 def find_images_deep(root: str | Path) -> list[str]:
@@ -50,7 +51,7 @@ def find_images_deep(root: str | Path) -> list[str]:
                     walk(full)
 
     walk(root)
-    return results
+    return sorted(results)
 
 
 def page_image_name(base_name: str, page: int, template: str = DEFAULT_TEMPLATE) -> str:

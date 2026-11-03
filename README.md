@@ -23,11 +23,7 @@ TypeScript original.
   - [Directory Search Depth](#directory-search-depth)
   - [Flatten Output](#flatten-output)
   - [Custom Filename Template](#custom-filename-template)
-  - [Output Files](#output-files)
-  - [Resume and Rerun](#resume-and-rerun)
-  - [Troubleshooting](#rotating_light-troubleshooting)
   - [Example Workflow](#example-workflow)
-  - [End-to-End Guide](#end-to-end-guide)
 - [Project Structure](#file_folder-project-structure)
 - [Running Tests](#test_tube-running-tests)
 - [Contributing](#wave-contributing)
@@ -61,6 +57,7 @@ Standalone module: a PDF (or folder of PDFs) in, page images plus a manifest out
 - Configurable output layout (`--flatten`) and page-image filename template
   (`{{filename}}`/`{{page_number}}` placeholders).
 - `--dry-run` on both `split` and `gather` for safe previewing.
+- `split` skips a PDF whose output folder already matches it (same content hash, same template); `--force` re-splits anyway.
 - Usable as a plain Python library (`split_all`/`gather_all`) or as the
   `pdfslice` CLI — same functions underneath either way.
 
@@ -73,11 +70,12 @@ Notes on how this Python port maps onto the TypeScript original:
   - [`Pillow`](https://python-pillow.org/) for rasterizing pages and encoding
     JPEGs. `pypdfium2` (Google's PDFium, BSD-licensed) was chosen over PyMuPDF
     specifically to keep pdfslice-py permissively licensed — PyMuPDF is AGPL.
-- `pdf-lib` → [`pypdf`](https://pypdf.readthedocs.io/) for reading page counts,
-  and Pillow's multi-page PDF writer for rebuilding a PDF from images in
-  `gather`.
-- `winston` → a small stdlib-`logging`-based `Logger`, with the same
-  level/verbose/quiet/log-file behavior, importable on its own for library use.
+- `pdf-lib` → Pillow's multi-page PDF writer for rebuilding a PDF from images
+  in `gather`. Page counts are never re-parsed: `split` records the renderer's
+  count in the manifest and `gather`/`check` use that number, so a folder split
+  by either implementation is checked against the same expectation.
+- `winston` → a small `Logger` with the same level/verbose/quiet/log-file
+  behavior and the same output lines, importable on its own for library use.
 - `@stricli/core` → [`click`](https://click.palletsprojects.com/) for the CLI.
 - The on-disk manifest (`.pdfslice-manifest.json`) uses the exact same camelCase
   JSON schema as the TypeScript version, so a folder split by either
@@ -155,7 +153,7 @@ Everything the CLI uses is importable from the top-level package: `split_all`,
 ### As a CLI
 
 ```bash
-pdfslice split <input> [--level <n>] [--flatten] [--template <string>] [--dry-run] [--verbose] [--quiet] [--log-file <path>]
+pdfslice split <input> [--level <n>] [--flatten] [--template <string>] [--force] [--dry-run] [--verbose] [--quiet] [--log-file <path>]
 pdfslice gather <input> [--backup/--no-backup] [--dry-run] [--verbose] [--quiet] [--log-file <path>]
 pdfslice check <input> [--verbose] [--quiet] [--log-file <path>]
 ```
@@ -236,33 +234,6 @@ filename (default: `{{filename}}.{{page_number}}.jpg`). Exactly one
 `gather`/`check` parse page numbers back out correctly without needing
 `--template` repeated.
 
-### Output Files
-
-| Path | Written by | Holds |
-|---|---|---|
-| `<name>/<name>.pdf` | `split` | a copy of the source PDF; the original is never touched |
-| `<name>/<name>.<NNN>.jpg` | `split` | one JPEG per page (2x resolution, quality 90), numbered from 1 and zero-padded to three digits |
-| `<name>/.pdfslice-manifest.json` | `split`, `gather` | page count, per-image SHA-256, filename template, `updatedAt`, `gatheredAt` |
-| `<name>/<name>.bak-<epoch ms>.pdf` | `gather` | the PDF as it was before it was overwritten (`--no-backup` skips it) |
-
-### Resume and Rerun
-
-- `split` has no skip rule: running it again rewrites every image and the manifest.
-- `gather` skips a unit whose images are unchanged since the last gather
-  (`No changes detected, skipping PDF creation`).
-- `check` never writes anything.
-- A folder counts as a split unit only if it holds a manifest.
-
-### :rotating_light: Troubleshooting
-
-| Symptom | Cause and fix |
-|---|---|
-| `Found 0 PDF(s)` | the PDFs are deeper than `--level`; raise it or pass one PDF |
-| `No manifest found in unit folder` | the folder was not produced by `split`; split it, or point at the right folder |
-| `Template must contain exactly one {{page_number}} placeholder` | fix `--template` |
-| `gather` wrote a shorter PDF | page images were missing and `gather` does not stop for that; run `check` first, restore `<name>.bak-*.pdf` |
-| two PDFs share one folder | `--flatten` with equal PDF names; rename the PDFs |
-
 ### Example Workflow
 
 ```bash
@@ -271,10 +242,29 @@ pdfslice check ./input/report
 pdfslice gather ./input/report
 ```
 
-### End-to-End Guide
+### :rotating_light: Logging and Errors
 
-Install, split, check, sort the images for the OCR pipeline, rebuild a PDF, and the common problems:
-[`docs/USER_GUIDE.md`](docs/USER_GUIDE.md).
+Every line is `<level>: <message> <compact JSON>`, identical to the `pdfslice`
+CLI (meta keys are camelCase there and here, so `output_folder=` in Python code
+prints as `outputFolder`):
+
+```text
+info: Found 3 PDF file(s) under ./documents {"searchLevel":1}
+info: Processing PDF 2/3 {"pdfPath":"./documents/sample.pdf"}
+error: Worker process crashed {"pdfPath":"./documents/sample.pdf","reason":"killed by signal SIGKILL (likely out of memory)","signal":"SIGKILL","stage":"render","page":212,"pageCount":340,"rssMb":1480}
+```
+
+- Errors go to stderr, everything else to stdout. `--log-file` writes the same
+  records as JSON lines.
+- Each PDF is split in its own worker process (`spawn`), like `pdfslice`. A PDF
+  that fails (worker error or crash) is logged with the `stage`, `page` and
+  worker memory (`rssMb`) it died at, then the run continues with the next PDF
+  and exits with code 1. Library users: guard scripts that call `split_all`
+  with `if __name__ == "__main__":`.
+- `--verbose` adds per-page lines (`Wrote page image`) and worker start/finish
+  lines with pid and duration.
+- `faulthandler` is enabled, so a native crash inside PDFium prints a Python
+  traceback instead of ending the process silently.
 
 ## :file_folder: Project Structure
 
@@ -283,6 +273,10 @@ src/pdfslice_py/
 ├── __init__.py             # public library API (re-exports below)
 ├── cli.py                  # click CLI: split, gather, check commands
 ├── discover.py             # find_pdfs, find_images_deep, page_image_name
+├── failure.py              # describe_error, stage/page progress for error logs
+├── pdf_rasterizer.py       # pypdfium2 wrapper (render one page at a time)
+├── split_one_file.py       # split one PDF; no logging, reports progress
+├── split_worker.py         # worker-process entry point (one process per PDF)
 ├── filename_template.py    # {{filename}}/{{page_number}} template compiler
 ├── gather.py                # rebuild PDF from images / check-only mode
 ├── hash.py                  # streamed SHA-256 file hashing
@@ -290,23 +284,18 @@ src/pdfslice_py/
 ├── manifest.py                # .pdfslice-manifest.json schema + read/write
 └── split.py                   # PDF -> per-page JPG splitting
 tests/
-├── test_cli.py
 ├── test_discover.py
 ├── test_filename_template.py
+├── test_logger_failure.py
 ├── test_manifest.py
 └── test_split_gather.py
-docs/
-├── SPECIFICATION.md         # what the code does today
-└── USER_GUIDE.md            # end-to-end guide
 ```
 
 ## :test_tube: Running Tests
 
 ```bash
-uv sync
+uv pip install -e ".[test]"
 uv run pytest -v
-uv run ruff check .
-uv run ruff format --check .
 ```
 
 ## :wave: Contributing
@@ -314,10 +303,6 @@ uv run ruff format --check .
 Contributions are always welcome!
 
 Please read the [contribution guidelines](./CONTRIBUTING.md).
-
-Repo-specific rules: the manifest keeps the camelCase JSON schema of the TypeScript original, so
-folders split by either tool stay readable by the other; the library never calls the network and does not depend
-on any pipeline repo.
 
 <!-- Code of Conduct -->
 

@@ -54,3 +54,31 @@ def test_json_schema_uses_camel_case_keys(tmp_path: Path):
     raw = manifest_path_for(tmp_path).read_text()
     for key in ("sourcePdf", "sourcePdfHash", "pageCount", "updatedAt", "filenameTemplate"):
         assert f'"{key}"' in raw
+
+
+def test_manifest_written_like_the_ts_cli(tmp_path: Path):
+    manifest = Manifest(
+        version=1,
+        sourcePdf="Sách Dạy (Quyển 11).pdf",
+        sourcePdfHash="h",
+        pageCount=0,
+        updatedAt="2026-01-01T00:00:00.000Z",
+        filenameTemplate="{{filename}}.{{page_number}}.jpg",
+    )
+    write_manifest(tmp_path, manifest)
+    raw = manifest_path_for(tmp_path).read_text(encoding="utf-8")
+    assert "Sách Dạy (Quyển 11).pdf" in raw  # raw UTF-8, not \u escapes
+    assert "gatheredAt" not in raw  # omitted until the first gather
+
+
+def test_reads_manifest_written_by_the_ts_cli(tmp_path: Path):
+    manifest_path_for(tmp_path).write_text(
+        '{"version":1,"sourcePdf":"a.pdf","sourcePdfHash":"h","pageCount":1,'
+        '"images":[{"file":"a.001.jpg","page":1,"hash":"x"}],'
+        '"updatedAt":"2026-01-01T00:00:00.000Z","filenameTemplate":"{{filename}}.{{page_number}}.jpg"}',
+        encoding="utf-8",
+    )
+    loaded = read_manifest(tmp_path)
+    assert loaded is not None
+    assert loaded.gatheredAt is None
+    assert loaded.images[0].page == 1
